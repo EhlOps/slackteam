@@ -1,0 +1,9 @@
+# Standing context channels. The EM reads pins + recent history from these.
+teams:
+  - { key: frontend,      channel: team-frontend,      description: "Web/mobile UI, design system, client performance" }
+  - { key: backend,       channel: team-backend,       description: "APIs, services, data models, databases" }
+  - { key: platform,      channel: team-platform,      description: "Infra, CI/CD, hosting, observability, the Oracle box" }
+  - { key: security-auth, channel: team-security-auth, description: "Authn/authz, secrets, compliance, threat modeling" }
+  - { key: ai-ml,         channel: team-ai-ml,         description: "Models, prompts, evals, data pipelines" }
+  - { key: core,          channel: team-core,          description: "Core product domain and shared libraries" }
+  - { key: other,         channel: team-other,         description: "Anything that fits no other team" }

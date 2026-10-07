@@ -1,0 +1,10 @@
+services:
+  orchestrator:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+      - ./config:/app/config:ro
+      - ./prompts:/app/prompts:ro
+      - ${HOME}/.ssh:/home/node/.ssh:ro

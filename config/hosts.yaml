@@ -1,0 +1,3 @@
+# SSH aliases must exist in ~/.ssh/config. prod: true => any write needs approval.
+hosts:
+  - { alias: oracle, description: "Oracle Cloud box", prod: true }
