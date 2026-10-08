@@ -1,7 +1,8 @@
 import type { App } from '@slack/bolt';
 import type { Ctx } from '../ctx.js';
 import { postAs } from './personas.js';
-import type { AgentName } from '../workflow/db.js';
+import type { Interactions } from './interactions.js';
+import type { AgentName, Pending } from '../workflow/db.js';
 import { addReposFromText } from '../workflow/repos.js';
 
 /** Pure routing decision for a message inside a job channel. */
@@ -14,12 +15,21 @@ export interface MessageEvent {
   user?: string; text?: string; channel: string; thread_ts?: string; ts?: string; bot_id?: string; subtype?: string; channel_type?: string;
 }
 
+/** R5: only the PM's human messages count; bot/persona posts (incl. our own acks and reminders) never do. */
+export function isPmMessage<T extends { user?: string; text?: string; bot_id?: string; subtype?: string }>(e: T, pm: string): e is T & { text: string } {
+  return !e.bot_id && !e.subtype && !!e.text && e.user === pm;
+}
+
+/** Acknowledge all questions closed by one PM message: exactly one call, none when nothing closed. */
+export async function acknowledgeClosures(interactions: Pick<Interactions, 'acknowledgeClosed'>, channel: string, closed: Pending[], pmMessageTs: string) {
+  if (closed.length) await interactions.acknowledgeClosed(channel, closed, pmMessageTs);
+}
+
 /** Handle a Slack message event. R5: only plain human messages from the PM count (bot/agent acks, reminders and edits are ignored). */
 export async function handlePmMessage(ctx: Ctx, e: MessageEvent) {
   const { db, interactions, runner, cfg, client } = ctx;
   const pm = cfg.env.PM_SLACK_USER_ID;
-  if (e.bot_id || e.subtype || !e.text) return;
-  if (e.user !== pm) return; // only the PM can direct the team
+  if (!isPmMessage(e, pm)) return; // only the PM can direct the team
 
   if (e.thread_ts) {
     const hit = interactions.handleReply(e.channel, e.thread_ts, e.text);
@@ -28,7 +38,7 @@ export async function handlePmMessage(ctx: Ctx, e: MessageEvent) {
       if (hit.orphaned) {
         void runner.send(hit.pending.job_id ?? 0, hit.pending.agent, `The PM answered your earlier question.\nQ: ${hit.pending.prompt}\nA: ${e.text}`, e.channel);
       }
-      if (e.ts) void interactions.acknowledgeClosed(e.channel, [hit.pending], e.ts);
+      if (e.ts) void acknowledgeClosures(interactions, e.channel, [hit.pending], e.ts);
       return;
     }
   }
@@ -43,7 +53,7 @@ export async function handlePmMessage(ctx: Ctx, e: MessageEvent) {
         const answer = db.answerOf(p.id) ?? e.text;
         void runner.send(p.job_id ?? 0, p.agent, `The PM answered your earlier question.\nQ: ${p.prompt}\nA: ${answer}`, e.channel);
       }
-      if (e.ts) await interactions.acknowledgeClosed(e.channel, r.closed, e.ts);
+      if (e.ts) await acknowledgeClosures(interactions, e.channel, r.closed, e.ts);
       return;
     }
     if (!r.passthrough) return; // re-asked or ambiguous: nothing closed, nothing forwarded

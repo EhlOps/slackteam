@@ -36,12 +36,13 @@ async function main() {
   const runner = new AgentRunner();
   const ctx: Ctx = {
     client, cfg, db, vault, runner,
-    interactions: new Interactions(client, db, cfg.env.APPROVAL_TIMEOUT_MIN * 60_000, { judge: claudeJudge(cfg.env.JUDGE_MODEL, cfg.env.JUDGE_TIMEOUT_MS), pm: cfg.env.PM_SLACK_USER_ID }),
+    interactions: new Interactions(client, db, cfg.env.APPROVAL_TIMEOUT_MIN * 60_000, { judge: claudeJudge(cfg.env.JUDGE_MODEL, cfg.env.JUDGE_TIMEOUT_MS), pm: cfg.env.PM_SLACK_USER_ID, reminderMs: cfg.env.QUESTION_REMINDER_MS }),
     worktrees: new Worktrees(cfg.env.DATA_DIR, cfg.repos),
     intakeChannel: await ensureChannel(client, 'em-intake'),
   };
   runner.ctx = ctx;
   registerHandlers(app, ctx);
+  ctx.interactions.rearmReminders();
   await app.start();
 
   const authErr = await checkClaudeAuth();
