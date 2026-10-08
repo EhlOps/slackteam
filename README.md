@@ -11,6 +11,8 @@ A Slack-driven agent team: you are the PM, the **EM** agent turns your goals int
    `docker compose run --rm orchestrator sh -c "gh auth setup-git && node dist/scripts/init-vault.js && node dist/scripts/bootstrap-slack.js"`
 6. `docker compose up -d`
 
+Production deploy/update/rollback on the Oracle box: see [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
 ## Using it
 - **Adding repos**: paste a GitHub link (repo, PR, branch, or `git@` URL) in a DM, `#em-intake` or a job channel and it's added to the repos the agents can work on (default branch auto-detected, stored in sqlite so it survives restarts). An optional `config/repos.yaml` is the place for `test_cmd`/teams. Your `GH_TOKEN` must have access to the repo.
 - DM the bot or post in `#em-intake` with a goal. The EM reads team context, asks questions, then opens a private `#job-NNNN-slug` channel.
