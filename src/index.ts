@@ -6,6 +6,7 @@ import { loadConfig } from './config.js';
 import type { Ctx } from './ctx.js';
 import { ensureChannel } from './slack/channels.js';
 import { Interactions } from './slack/interactions.js';
+import { claudeJudge } from './slack/matcher.js';
 import { postAs } from './slack/personas.js';
 import { registerHandlers } from './slack/router.js';
 import { Vault } from './vault/git.js';
@@ -35,7 +36,7 @@ async function main() {
   const runner = new AgentRunner();
   const ctx: Ctx = {
     client, cfg, db, vault, runner,
-    interactions: new Interactions(client, db, cfg.env.APPROVAL_TIMEOUT_MIN * 60_000, cfg.env.PM_SLACK_USER_ID, cfg.env.QUESTION_REMINDER_MS),
+    interactions: new Interactions(client, db, cfg.env.APPROVAL_TIMEOUT_MIN * 60_000, { judge: claudeJudge(cfg.env.JUDGE_MODEL, cfg.env.JUDGE_TIMEOUT_MS), pm: cfg.env.PM_SLACK_USER_ID, reminderMs: cfg.env.QUESTION_REMINDER_MS }),
     worktrees: new Worktrees(cfg.env.DATA_DIR, cfg.repos),
     intakeChannel: await ensureChannel(client, 'em-intake'),
   };

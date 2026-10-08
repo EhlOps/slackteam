@@ -14,6 +14,8 @@ const Env = z.object({
   MAX_CONCURRENT_JOBS: z.coerce.number().int().positive().default(1),
   APPROVAL_TIMEOUT_MIN: z.coerce.number().positive().default(60),
   QUESTION_REMINDER_MS: z.coerce.number().int().positive().default(30 * 60_000),
+  JUDGE_MODEL: z.string().default('claude-haiku-4-5'),
+  JUDGE_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
 });
 
 const Teams = z.object({

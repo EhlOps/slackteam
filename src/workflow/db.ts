@@ -73,7 +73,10 @@ export function openDb(path: string) {
       'INSERT INTO pending (job_id, kind, agent, channel_id, message_ts, prompt) VALUES (?, ?, ?, ?, ?, ?)'),
     pendingByMsg: db.prepare('SELECT * FROM pending WHERE channel_id = ? AND message_ts = ? AND answer IS NULL'),
     openPending: db.prepare('SELECT * FROM pending WHERE answer IS NULL'),
-    answer: db.prepare('UPDATE pending SET answer = ? WHERE id = ?'),
+    answer: db.prepare('UPDATE pending SET answer = ? WHERE id = ? AND answer IS NULL'),
+    answerOf: db.prepare('SELECT answer FROM pending WHERE id = ?'),
+    openQuestionsByChannel: db.prepare("SELECT * FROM pending WHERE kind = 'question' AND answer IS NULL AND channel_id = ? ORDER BY id"),
+    openQuestionsByJob: db.prepare("SELECT * FROM pending WHERE kind = 'question' AND answer IS NULL AND job_id = ? ORDER BY id"),
     putWorkdir: db.prepare(
       'INSERT OR REPLACE INTO workdirs (job_id, agent, repo, path, branch, workstream) VALUES (?, ?, ?, ?, ?, ?)'),
     getWorkdir: db.prepare('SELECT * FROM workdirs WHERE job_id = ? AND agent = ?'),
@@ -100,7 +103,11 @@ export function openDb(path: string) {
       Number(q.addPending.run(p.job_id, p.kind, p.agent, p.channel_id, p.message_ts, p.prompt).lastInsertRowid),
     pendingByMsg: (ch: string, ts: string) => q.pendingByMsg.get(ch, ts) as Pending | undefined,
     openPending: () => q.openPending.all() as Pending[],
-    answer: (id: number, a: string) => void q.answer.run(a, id),
+    /** Closes a pending item. Returns false if it was already answered (conditional update). */
+    answer: (id: number, a: string): boolean => q.answer.run(a, id).changes > 0,
+    answerOf: (id: number) => (q.answerOf.get(id) as { answer: string | null } | undefined)?.answer ?? undefined,
+    openQuestionsByChannel: (ch: string) => q.openQuestionsByChannel.all(ch) as Pending[],
+    openQuestionsByJob: (job: number) => q.openQuestionsByJob.all(job) as Pending[],
     putWorkdir: (w: Omit<Workdir, 'tp_id' | 'approved' | 'pr'>) =>
       void q.putWorkdir.run(w.job_id, w.agent, w.repo, w.path, w.branch, w.workstream),
     getWorkdir: (job: number, agent: AgentName) => q.getWorkdir.get(job, agent) as Workdir | undefined,

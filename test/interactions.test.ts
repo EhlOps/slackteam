@@ -21,7 +21,7 @@ function setup(reactionsFail = false) {
     },
   };
   const db = openDb(':memory:');
-  const ix = new Interactions(client, db, 60 * 60_000, PM, REM);
+  const ix = new Interactions(client, db, 60 * 60_000, { pm: PM, reminderMs: REM });
   return { posts, reactions, client, db, ix };
 }
 const reminders = (posts: any[]) => posts.filter((p) => /still waiting/.test(p.text));
@@ -45,8 +45,8 @@ describe('R1 mentions', () => {
   });
   it('rejects a malformed PM id instead of posting <@undefined>', () => {
     const { client, db } = setup();
-    expect(() => new Interactions(client, db, 1, undefined as any)).toThrow();
-    expect(() => new Interactions(client, db, 1, '@pm')).toThrow();
+    expect(() => new Interactions(client, db, 1, { pm: '@pm' })).toThrow();
+    expect(() => new Interactions(client, db, 1, { pm: '' })).toThrow();
   });
 });
 
@@ -117,10 +117,24 @@ describe('R9 reminders', () => {
     await vi.advanceTimersByTimeAsync(REM * 5);
     expect(reminders(posts)).toHaveLength(0);
   });
+  it('clears the reminder when the matcher closes the question via handleChannelMessage', async () => {
+    const { posts, client, db } = setup();
+    const ix = new Interactions(client, db, 60 * 60_000, {
+      pm: PM, reminderMs: REM,
+      judge: async () => ({ outcome: 'answers', answers: [{ id: 1, answer_excerpt: 'yes' }] }),
+    });
+    void ix.ask(null, 'SWE-2', 'C1', 'q');
+    await vi.advanceTimersByTimeAsync(0);
+    const out = await ix.handleChannelMessage('C1', 'yes');
+    expect(out.closed).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(REM * 5);
+    expect(reminders(posts)).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it('rearmReminders after restart creates no duplicate timers', async () => {
     const { posts, client, db } = setup();
     db.addPending({ job_id: null, kind: 'question', agent: 'SWE-2', channel_id: 'C1', message_ts: '5.5', prompt: 'old q' });
-    const ix2 = new Interactions(client, db, 60 * 60_000, PM, REM);
+    const ix2 = new Interactions(client, db, 60 * 60_000, { pm: PM, reminderMs: REM });
     ix2.rearmReminders();
     ix2.rearmReminders();
     await vi.advanceTimersByTimeAsync(REM * 10);

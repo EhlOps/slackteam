@@ -11,14 +11,67 @@ export function routeJobMessage(text: string): { agent: AgentName; text: string 
   return m ? { agent: `SWE-${m[2]}` as AgentName, text: m[3] } : { agent: 'EM', text };
 }
 
+export interface MessageEvent {
+  user?: string; text?: string; channel: string; thread_ts?: string; ts?: string; bot_id?: string; subtype?: string; channel_type?: string;
+}
+
 /** R5: only the PM's human messages count; bot/persona posts (incl. our own acks and reminders) never do. */
-export function isPmMessage(e: { user?: string; text?: string; bot_id?: string; subtype?: string }, pm: string): boolean {
+export function isPmMessage<T extends { user?: string; text?: string; bot_id?: string; subtype?: string }>(e: T, pm: string): e is T & { text: string } {
   return !e.bot_id && !e.subtype && !!e.text && e.user === pm;
 }
 
 /** Acknowledge all questions closed by one PM message: exactly one call, none when nothing closed. */
 export async function acknowledgeClosures(interactions: Pick<Interactions, 'acknowledgeClosed'>, channel: string, closed: Pending[], pmMessageTs: string) {
   if (closed.length) await interactions.acknowledgeClosed(channel, closed, pmMessageTs);
+}
+
+/** Handle a Slack message event. R5: only plain human messages from the PM count (bot/agent acks, reminders and edits are ignored). */
+export async function handlePmMessage(ctx: Ctx, e: MessageEvent) {
+  const { db, interactions, runner, cfg, client } = ctx;
+  const pm = cfg.env.PM_SLACK_USER_ID;
+  if (!isPmMessage(e, pm)) return; // only the PM can direct the team
+
+  if (e.thread_ts) {
+    const hit = interactions.handleReply(e.channel, e.thread_ts, e.text);
+    if (hit) {
+      // Agent process died (restart) before the answer: resume its session with the answer.
+      if (hit.orphaned) {
+        void runner.send(hit.pending.job_id ?? 0, hit.pending.agent, `The PM answered your earlier question.\nQ: ${hit.pending.prompt}\nA: ${e.text}`, e.channel);
+      }
+      if (e.ts) void acknowledgeClosures(interactions, e.channel, [hit.pending], e.ts);
+      return;
+    }
+  }
+
+  const job = db.jobByChannel(e.channel);
+  if (job && !e.thread_ts) {
+    // Top-level PM message in a job channel: match against open questions (R3/R6); otherwise it is a normal request (R7).
+    const r = await interactions.handleChannelMessage(e.channel, e.text);
+    if (r.closed.length) {
+      for (const p of r.closed) {
+        if (!r.orphaned.has(p.id)) continue;
+        const answer = db.answerOf(p.id) ?? e.text;
+        void runner.send(p.job_id ?? 0, p.agent, `The PM answered your earlier question.\nQ: ${p.prompt}\nA: ${answer}`, e.channel);
+      }
+      if (e.ts) await acknowledgeClosures(interactions, e.channel, r.closed, e.ts);
+      return;
+    }
+    if (!r.passthrough) return; // re-asked or ambiguous: nothing closed, nothing forwarded
+  }
+
+  if (job || e.channel_type === 'im' || e.channel === ctx.intakeChannel) {
+    const added = await addReposFromText(e.text, cfg.repos, db).catch(() => []);
+    if (added.length) {
+      const list = added.map((r) => `\`${r.name}\` (${r.github}@${r.default_branch})`).join(', ');
+      await postAs(client, 'EM', { channel: e.channel, thread_ts: e.thread_ts, text: `:link: Added ${list} to the repos I can work on.` }).catch(() => undefined);
+    }
+  }
+  if (job) {
+    const r = routeJobMessage(e.text);
+    void runner.send(job.id, r.agent, `PM: ${r.text}`, e.channel);
+  } else if (e.channel_type === 'im' || e.channel === ctx.intakeChannel) {
+    void runner.send(0, 'EM', `PM: ${e.text}`, e.channel);
+  }
 }
 
 export function registerHandlers(app: App, ctx: Ctx) {
@@ -34,40 +87,7 @@ export function registerHandlers(app: App, ctx: Ctx) {
   };
   void loadTeamChannels();
 
-  app.event('message', async ({ event }) => {
-    const e = event as { user?: string; text?: string; channel: string; ts: string; thread_ts?: string; bot_id?: string; subtype?: string; channel_type?: string };
-    if (!isPmMessage(e, pm)) return; // only the PM can direct the team
-    const text = e.text!;
-
-    if (e.thread_ts) {
-      const hit = interactions.handleReply(e.channel, e.thread_ts, text);
-      if (hit) {
-        void acknowledgeClosures(interactions, e.channel, [hit.pending], e.ts);
-        // Agent process died (restart) before the answer: resume its session with the answer.
-        if (hit.orphaned && hit.pending.job_id !== null) {
-          void runner.send(hit.pending.job_id, hit.pending.agent, `The PM answered your earlier question.\nQ: ${hit.pending.prompt}\nA: ${text}`, e.channel);
-        } else if (hit.orphaned) {
-          void runner.send(0, hit.pending.agent, `The PM answered your earlier question.\nQ: ${hit.pending.prompt}\nA: ${text}`, e.channel);
-        }
-        return;
-      }
-    }
-
-    const job = db.jobByChannel(e.channel);
-    if (job || e.channel_type === 'im' || e.channel === ctx.intakeChannel) {
-      const added = await addReposFromText(text, cfg.repos, db).catch(() => []);
-      if (added.length) {
-        const list = added.map((r) => `\`${r.name}\` (${r.github}@${r.default_branch})`).join(', ');
-        await postAs(client, 'EM', { channel: e.channel, thread_ts: e.thread_ts, text: `:link: Added ${list} to the repos I can work on.` }).catch(() => undefined);
-      }
-    }
-    if (job) {
-      const r = routeJobMessage(text);
-      void runner.send(job.id, r.agent, `PM: ${r.text}`, e.channel);
-    } else if (e.channel_type === 'im' || e.channel === ctx.intakeChannel) {
-      void runner.send(0, 'EM', `PM: ${text}`, e.channel);
-    }
-  });
+  app.event('message', async ({ event }) => handlePmMessage(ctx, event as MessageEvent));
 
   // @mention in a team context channel: talk to the EM about that team without starting a job.
   app.event('app_mention', async ({ event }) => {

@@ -1,6 +1,17 @@
 import type { WebClient } from '@slack/web-api';
 import type { Db, AgentName, Pending } from '../workflow/db.js';
 import { postAs } from './personas.js';
+import { matchAnswer, type Judge } from './matcher.js';
+
+export interface ChannelOutcome {
+  closed: Pending[];
+  /** Closed questions whose agent was no longer waiting (restart): caller must resume the agent. */
+  orphaned: Set<number>;
+  /** Question ids re-asked (partial answer). */
+  reasked: number[];
+  /** True when the message is not an answer and must be processed as a normal request. */
+  passthrough: boolean;
+}
 
 const MAX_REMINDERS = 3;
 type Resolver = (answer: string) => void;
@@ -8,19 +19,18 @@ type Resolver = (answer: string) => void;
 /** Parks agent tool calls until the PM answers in Slack. Survives restarts: pendings live in SQLite and are re-posted. */
 export class Interactions {
   private waiters = new Map<number, Resolver>();
+  /** Per-channel promise chain. Single-process assumption (one app, one SQLite file); the conditional DB update guards races regardless. */
+  private chains = new Map<string, Promise<unknown>>();
   private reminders = new Map<number, { timer: NodeJS.Timeout; count: number }>();
-  constructor(
-    private client: WebClient,
-    private db: Db,
-    private timeoutMs: number,
-    private pmUserId: string,
-    private reminderMs = 30 * 60_000,
-  ) {
-    if (!/^[UW][A-Z0-9]{2,}$/.test(pmUserId)) throw new Error(`Invalid PM Slack user id: ${JSON.stringify(pmUserId)}`);
+  private reminderMs: number;
+  constructor(private client: WebClient, private db: Db, private timeoutMs: number, private opts: { judge?: Judge; pm?: string; reminderMs?: number } = {}) {
+    if (opts.pm !== undefined && !/^[UW][A-Z0-9]{2,}$/.test(opts.pm)) throw new Error(`Invalid PM Slack user id: ${JSON.stringify(opts.pm)}`);
+    this.reminderMs = opts.reminderMs ?? 30 * 60_000;
   }
 
-  private get mention() {
-    return `<@${this.pmUserId}>`;
+  /** @mention of the PM (empty when no PM id is configured, so we never post `<@undefined>`). */
+  pmMention(): string {
+    return this.opts.pm ? `<@${this.opts.pm}>` : '';
   }
 
   /** Arm (at most one) reminder chain for a pending item; re-@mentions the PM up to MAX_REMINDERS times. */
@@ -33,7 +43,7 @@ export class Interactions {
       void postAs(this.client, 'EM', {
         channel: p.channel_id,
         thread_ts: p.message_ts,
-        text: `${this.mention} still waiting on ${what}: ${p.prompt.slice(0, 200)}`,
+        text: `${this.pmMention()} still waiting on ${what}: ${p.prompt.slice(0, 200)}`.trim(),
       }).catch(() => undefined);
       this.armReminder(p, count + 1);
     }, this.reminderMs);
@@ -60,15 +70,16 @@ export class Interactions {
   }
 
   /** Resolve a pending item (idempotent). */
-  resolve(pendingId: number, answer: string) {
-    this.db.answer(pendingId, answer);
+  resolve(pendingId: number, answer: string): boolean {
+    if (!this.db.answer(pendingId, answer)) return false; // already closed elsewhere: do not wake twice
     this.clearReminder(pendingId);
     this.waiters.get(pendingId)?.(answer);
     this.waiters.delete(pendingId);
+    return true;
   }
 
   async ask(jobId: number | null, agent: AgentName, channel: string, question: string): Promise<string> {
-    const ts = await postAs(this.client, agent, { channel, text: `${this.mention} :question: ${question}\n_Reply here or in this thread._` });
+    const ts = await postAs(this.client, agent, { channel, text: `${this.pmMention()} :question: ${question}\n_Reply here or in this thread._`.trim() });
     const id = this.db.addPending({ job_id: jobId, kind: 'question', agent, channel_id: channel, message_ts: ts, prompt: question });
     this.armReminder({ id, channel_id: channel, message_ts: ts, prompt: question, kind: 'question' });
     return this.wait(id);
@@ -77,9 +88,9 @@ export class Interactions {
   async approve(jobId: number | null, agent: AgentName, channel: string, action: string, reason: string): Promise<boolean> {
     const ts = await postAs(this.client, agent, {
       channel,
-      text: `${this.mention} Approval needed: ${action}`,
+      text: `${this.pmMention()} Approval needed: ${action}`.trim(),
       blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: `${this.mention} :warning: *Approval needed*\n\`\`\`${action.slice(0, 2500)}\`\`\`\n*Why:* ${reason}` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `${this.pmMention()} :warning: *Approval needed*\n\`\`\`${action.slice(0, 2500)}\`\`\`\n*Why:* ${reason}` } },
         {
           type: 'actions',
           elements: [
@@ -103,25 +114,8 @@ export class Interactions {
     const p = this.db.pendingByMsg(channel, threadTs);
     if (!p || p.kind !== 'question') return undefined;
     const orphaned = !this.waiters.has(p.id);
-    this.resolve(p.id, text);
+    if (!this.resolve(p.id, text)) return undefined; // lost a race with another answer
     return { pending: p, orphaned };
-  }
-
-  /**
-   * Acknowledge questions that were just closed by one PM message: a reaction (best effort; needs the
-   * reactions:write scope) plus one short message in the thread of the first closed question. Never throws.
-   */
-  async acknowledgeClosed(channel: string, closed: Pending[], pmMessageTs: string): Promise<void> {
-    if (!closed.length) return;
-    const react = (ts: string) =>
-      this.client.reactions.add({ channel, timestamp: ts, name: 'white_check_mark' }).catch(() => undefined);
-    await Promise.all([pmMessageTs, ...closed.map((c) => c.message_ts)].map(react));
-    const list = closed.map((c) => `• ${c.prompt.replace(/\s+/g, ' ').slice(0, 60)}${c.prompt.length > 60 ? '…' : ''}`).join('\n');
-    await postAs(this.client, 'EM', {
-      channel,
-      thread_ts: closed[0].message_ts,
-      text: `:white_check_mark: Closed ${closed.length === 1 ? '1 question' : `${closed.length} questions`}:\n${list}`,
-    }).catch(() => undefined);
   }
 
   /** A button click. Returns true if it resolved a pending approval. */
@@ -132,4 +126,63 @@ export class Interactions {
     return true;
   }
 
+  /**
+   * A top-level PM message in a channel with (possibly) open questions. Serialized per channel.
+   * Closes every question the message answers, re-asks only what remains, and reports passthrough
+   * when the message is not an answer so the caller processes it as a normal request.
+   */
+  handleChannelMessage(channel: string, text: string): Promise<ChannelOutcome> {
+    const prev = this.chains.get(channel) ?? Promise.resolve();
+    const run = prev.then(() => this.matchAndClose(channel, text));
+    this.chains.set(channel, run.catch(() => undefined));
+    return run;
+  }
+
+  private async matchAndClose(channel: string, text: string): Promise<ChannelOutcome> {
+    const out: ChannelOutcome = { closed: [], orphaned: new Set(), reasked: [], passthrough: false };
+    const open = this.db.openQuestionsByChannel(channel);
+    const m = open.length && this.opts.judge ? await matchAnswer(text, open, this.opts.judge) : ({ kind: 'none' } as const);
+    if (m.kind === 'none') return { ...out, passthrough: true };
+    const byId = new Map(open.map((q) => [q.id, q]));
+    for (const a of m.answers) {
+      const p = byId.get(a.id)!;
+      const orphaned = !this.waiters.has(p.id);
+      if (!this.resolve(p.id, a.answer)) continue; // closed concurrently (e.g. thread reply): not ours to ack
+      out.closed.push(p);
+      if (orphaned) out.orphaned.add(p.id);
+    }
+    const mention = this.pmMention();
+    for (const r of m.remaining) {
+      const p = byId.get(r.id)!;
+      await postAs(this.client, p.agent, { channel, thread_ts: p.message_ts, text: `${mention} Still need an answer on: ${r.missing}`.trim() }).catch(() => undefined);
+      out.reasked.push(p.id);
+    }
+    if (m.ambiguous) {
+      const list = open.map((q) => `• ${q.prompt}`).join('\n');
+      await postAs(this.client, open[0].agent, { channel, text: `${mention} I could not tell which question that answers, so I closed nothing. Please reply in the thread of the question:\n${list}`.trim() }).catch(() => undefined);
+    }
+    return out;
+  }
+
+  /**
+   * Acknowledge questions that were just closed by one PM message: a reaction (best effort; needs the
+   * reactions:write scope) plus one short message in the thread of the first closed question. Never throws.
+   */
+  async acknowledgeClosed(channel: string, closed: Pending[], pmMessageTs: string): Promise<void> {
+    if (!closed.length) return;
+    const react = async (ts: string) => {
+      try {
+        await this.client.reactions.add({ channel, timestamp: ts, name: 'white_check_mark' });
+      } catch {
+        /* missing reactions:write scope or message gone: the message ack below still goes out */
+      }
+    };
+    await Promise.all([pmMessageTs, ...closed.map((c) => c.message_ts)].map(react));
+    const list = closed.map((c) => `• ${c.prompt.replace(/\s+/g, ' ').slice(0, 60)}${c.prompt.length > 60 ? '…' : ''}`).join('\n');
+    await postAs(this.client, 'EM', {
+      channel,
+      thread_ts: closed[0].message_ts,
+      text: `:white_check_mark: Closed ${closed.length === 1 ? '1 question' : `${closed.length} questions`}:\n${list}`,
+    }).catch(() => undefined);
+  }
 }
