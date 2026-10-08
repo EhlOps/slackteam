@@ -1,13 +1,24 @@
 import type { App } from '@slack/bolt';
 import type { Ctx } from '../ctx.js';
 import { postAs } from './personas.js';
-import type { AgentName } from '../workflow/db.js';
+import type { Interactions } from './interactions.js';
+import type { AgentName, Pending } from '../workflow/db.js';
 import { addReposFromText } from '../workflow/repos.js';
 
 /** Pure routing decision for a message inside a job channel. */
 export function routeJobMessage(text: string): { agent: AgentName; text: string } {
   const m = /^\s*(swe-?([12]))\s*[:,]\s*([\s\S]*)$/i.exec(text);
   return m ? { agent: `SWE-${m[2]}` as AgentName, text: m[3] } : { agent: 'EM', text };
+}
+
+/** R5: only the PM's human messages count; bot/persona posts (incl. our own acks and reminders) never do. */
+export function isPmMessage(e: { user?: string; text?: string; bot_id?: string; subtype?: string }, pm: string): boolean {
+  return !e.bot_id && !e.subtype && !!e.text && e.user === pm;
+}
+
+/** Acknowledge all questions closed by one PM message: exactly one call, none when nothing closed. */
+export async function acknowledgeClosures(interactions: Pick<Interactions, 'acknowledgeClosed'>, channel: string, closed: Pending[], pmMessageTs: string) {
+  if (closed.length) await interactions.acknowledgeClosed(channel, closed, pmMessageTs);
 }
 
 export function registerHandlers(app: App, ctx: Ctx) {
@@ -24,18 +35,19 @@ export function registerHandlers(app: App, ctx: Ctx) {
   void loadTeamChannels();
 
   app.event('message', async ({ event }) => {
-    const e = event as { user?: string; text?: string; channel: string; thread_ts?: string; bot_id?: string; subtype?: string; channel_type?: string };
-    if (e.bot_id || e.subtype || !e.text) return;
-    if (e.user !== pm) return; // only the PM can direct the team
+    const e = event as { user?: string; text?: string; channel: string; ts: string; thread_ts?: string; bot_id?: string; subtype?: string; channel_type?: string };
+    if (!isPmMessage(e, pm)) return; // only the PM can direct the team
+    const text = e.text!;
 
     if (e.thread_ts) {
-      const hit = interactions.handleReply(e.channel, e.thread_ts, e.text);
+      const hit = interactions.handleReply(e.channel, e.thread_ts, text);
       if (hit) {
+        void acknowledgeClosures(interactions, e.channel, [hit.pending], e.ts);
         // Agent process died (restart) before the answer: resume its session with the answer.
         if (hit.orphaned && hit.pending.job_id !== null) {
-          void runner.send(hit.pending.job_id, hit.pending.agent, `The PM answered your earlier question.\nQ: ${hit.pending.prompt}\nA: ${e.text}`, e.channel);
+          void runner.send(hit.pending.job_id, hit.pending.agent, `The PM answered your earlier question.\nQ: ${hit.pending.prompt}\nA: ${text}`, e.channel);
         } else if (hit.orphaned) {
-          void runner.send(0, hit.pending.agent, `The PM answered your earlier question.\nQ: ${hit.pending.prompt}\nA: ${e.text}`, e.channel);
+          void runner.send(0, hit.pending.agent, `The PM answered your earlier question.\nQ: ${hit.pending.prompt}\nA: ${text}`, e.channel);
         }
         return;
       }
@@ -43,17 +55,17 @@ export function registerHandlers(app: App, ctx: Ctx) {
 
     const job = db.jobByChannel(e.channel);
     if (job || e.channel_type === 'im' || e.channel === ctx.intakeChannel) {
-      const added = await addReposFromText(e.text, cfg.repos, db).catch(() => []);
+      const added = await addReposFromText(text, cfg.repos, db).catch(() => []);
       if (added.length) {
         const list = added.map((r) => `\`${r.name}\` (${r.github}@${r.default_branch})`).join(', ');
         await postAs(client, 'EM', { channel: e.channel, thread_ts: e.thread_ts, text: `:link: Added ${list} to the repos I can work on.` }).catch(() => undefined);
       }
     }
     if (job) {
-      const r = routeJobMessage(e.text);
+      const r = routeJobMessage(text);
       void runner.send(job.id, r.agent, `PM: ${r.text}`, e.channel);
     } else if (e.channel_type === 'im' || e.channel === ctx.intakeChannel) {
-      void runner.send(0, 'EM', `PM: ${e.text}`, e.channel);
+      void runner.send(0, 'EM', `PM: ${text}`, e.channel);
     }
   });
 

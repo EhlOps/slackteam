@@ -35,12 +35,13 @@ async function main() {
   const runner = new AgentRunner();
   const ctx: Ctx = {
     client, cfg, db, vault, runner,
-    interactions: new Interactions(client, db, cfg.env.APPROVAL_TIMEOUT_MIN * 60_000),
+    interactions: new Interactions(client, db, cfg.env.APPROVAL_TIMEOUT_MIN * 60_000, cfg.env.PM_SLACK_USER_ID, cfg.env.QUESTION_REMINDER_MS),
     worktrees: new Worktrees(cfg.env.DATA_DIR, cfg.repos),
     intakeChannel: await ensureChannel(client, 'em-intake'),
   };
   runner.ctx = ctx;
   registerHandlers(app, ctx);
+  ctx.interactions.rearmReminders();
   await app.start();
 
   const authErr = await checkClaudeAuth();

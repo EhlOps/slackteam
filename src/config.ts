@@ -6,11 +6,14 @@ import { z } from 'zod';
 const Env = z.object({
   SLACK_BOT_TOKEN: z.string().startsWith('xoxb-'),
   SLACK_APP_TOKEN: z.string().startsWith('xapp-'),
-  PM_SLACK_USER_ID: z.string().min(1),
+  PM_SLACK_USER_ID: z
+    .string({ error: 'PM_SLACK_USER_ID is required (your Slack member ID, e.g. U0123456)' })
+    .regex(/^[UW][A-Z0-9]{2,}$/, 'PM_SLACK_USER_ID must be a Slack member ID like U0123456 (profile -> ... -> Copy member ID), not a name or @handle'),
   VAULT_REPO: z.string().min(1),
   DATA_DIR: z.string().default('/data'),
   MAX_CONCURRENT_JOBS: z.coerce.number().int().positive().default(1),
   APPROVAL_TIMEOUT_MIN: z.coerce.number().positive().default(60),
+  QUESTION_REMINDER_MS: z.coerce.number().int().positive().default(30 * 60_000),
 });
 
 const Teams = z.object({

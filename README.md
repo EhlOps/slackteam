@@ -19,7 +19,7 @@ A Slack-driven agent team: you are the PM, the **EM** agent turns your goals int
 - Tell the EM to close the job when merged: it marks the PRD shipped, posts a summary to the team channels, removes worktrees and archives the channel.
 
 ## Safeguards
-- Only `PM_SLACK_USER_ID` can direct the agents.
+- Only `PM_SLACK_USER_ID` (a Slack member ID like `U0123456`; startup fails if missing or malformed) can direct the agents. Agents @mention this user when they ask a question or need approval, and re-mention them every `QUESTION_REMINDER_MS` (default 30 min, max 3 times) while unanswered. Closed questions are acknowledged with a message and a reaction (the reaction needs the `reactions:write` scope: reinstall the app after updating `slack-manifest.yaml`).
 - Every Bash call is classified (`src/guard/risky.ts`), including the command inside `ssh host '...'`; risky ones wait for your approval (timeout = denied).
 - SWEs cannot Edit/Write until the EM approves their tech plan, and only inside their worktree. The EM has no shell and writes only through `write_okr`/`write_prd`.
 

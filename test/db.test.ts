@@ -27,7 +27,7 @@ describe('db + interactions', () => {
 
   it('ask() resolves when the PM replies in the thread', async () => {
     const db = mk();
-    const i = new Interactions(fakeClient, db, 60_000);
+    const i = new Interactions(fakeClient, db, 60_000, "U0PM1234");
     const p = i.ask(null, 'EM', 'C1', 'which db?');
     await new Promise((r) => setTimeout(r, 5));
     const hit = i.handleReply('C1', '1.1', 'postgres');
@@ -38,14 +38,14 @@ describe('db + interactions', () => {
   it('flags a reply as orphaned when no agent is waiting (after restart)', () => {
     const db = mk();
     db.addPending({ job_id: 1, kind: 'question', agent: 'SWE-1', channel_id: 'C1', message_ts: '9.9', prompt: 'q' });
-    const i = new Interactions(fakeClient, db, 60_000);
+    const i = new Interactions(fakeClient, db, 60_000, "U0PM1234");
     expect(i.handleReply('C1', '9.9', 'a')?.orphaned).toBe(true);
     expect(i.handleReply('C1', '9.9', 'again')).toBeUndefined(); // already answered
   });
 
   it('approval buttons resolve to boolean and time out to denied', async () => {
     const db = mk();
-    const i = new Interactions(fakeClient, db, 20);
+    const i = new Interactions(fakeClient, db, 20, "U0PM1234");
     const ok = i.approve(null, 'SWE-1', 'C1', 'rm -rf x', 'why');
     await new Promise((r) => setTimeout(r, 5));
     expect(i.handleButton('C1', '1.2', 'approve')).toBe(true);
