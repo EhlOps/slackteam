@@ -53,3 +53,17 @@ describe('db + interactions', () => {
     expect(await i.approve(null, 'SWE-1', 'C1', 'sudo x', 'why')).toBe(false); // times out
   });
 });
+
+describe('open questions', () => {
+  it('lists open questions per channel/job and closes conditionally', () => {
+    const db = mk();
+    const a = db.addPending({ job_id: 1, kind: 'question', agent: 'EM', channel_id: 'C1', message_ts: '1.1', prompt: 'a' });
+    db.addPending({ job_id: 1, kind: 'approval', agent: 'EM', channel_id: 'C1', message_ts: '1.2', prompt: 'b' });
+    expect(db.openQuestionsByChannel('C1').map((p) => p.id)).toEqual([a]);
+    expect(db.openQuestionsByJob(1)).toHaveLength(1);
+    expect(db.answer(a, 'x')).toBe(true);
+    expect(db.answer(a, 'y')).toBe(false);
+    expect(db.answerOf(a)).toBe('x');
+    expect(db.openQuestionsByChannel('C1')).toHaveLength(0);
+  });
+});

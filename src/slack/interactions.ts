@@ -1,13 +1,31 @@
 import type { WebClient } from '@slack/web-api';
 import type { Db, AgentName, Pending } from '../workflow/db.js';
 import { postAs } from './personas.js';
+import { matchAnswer, type Judge } from './matcher.js';
+
+export interface ChannelOutcome {
+  closed: Pending[];
+  /** Closed questions whose agent was no longer waiting (restart): caller must resume the agent. */
+  orphaned: Set<number>;
+  /** Question ids re-asked (partial answer). */
+  reasked: number[];
+  /** True when the message is not an answer and must be processed as a normal request. */
+  passthrough: boolean;
+}
 
 type Resolver = (answer: string) => void;
 
 /** Parks agent tool calls until the PM answers in Slack. Survives restarts: pendings live in SQLite and are re-posted. */
 export class Interactions {
   private waiters = new Map<number, Resolver>();
-  constructor(private client: WebClient, private db: Db, private timeoutMs: number) {}
+  /** Per-channel promise chain. Single-process assumption (one app, one SQLite file); the conditional DB update guards races regardless. */
+  private chains = new Map<string, Promise<unknown>>();
+  constructor(private client: WebClient, private db: Db, private timeoutMs: number, private opts: { judge?: Judge; pm?: string } = {}) {}
+
+  /** @mention of the PM (placeholder; SWE-2's TP-0003-b owns the final helper). */
+  pmMention(): string {
+    return this.opts.pm ? `<@${this.opts.pm}>` : '';
+  }
 
   private wait(pendingId: number, timeoutMs?: number): Promise<string> {
     return new Promise((resolve) => {
@@ -17,10 +35,11 @@ export class Interactions {
   }
 
   /** Resolve a pending item (idempotent). */
-  resolve(pendingId: number, answer: string) {
-    this.db.answer(pendingId, answer);
+  resolve(pendingId: number, answer: string): boolean {
+    if (!this.db.answer(pendingId, answer)) return false; // already closed elsewhere: do not wake twice
     this.waiters.get(pendingId)?.(answer);
     this.waiters.delete(pendingId);
+    return true;
   }
 
   async ask(jobId: number | null, agent: AgentName, channel: string, question: string): Promise<string> {
@@ -57,7 +76,7 @@ export class Interactions {
     const p = this.db.pendingByMsg(channel, threadTs);
     if (!p || p.kind !== 'question') return undefined;
     const orphaned = !this.waiters.has(p.id);
-    this.resolve(p.id, text);
+    if (!this.resolve(p.id, text)) return undefined; // lost a race with another answer
     return { pending: p, orphaned };
   }
 
@@ -69,4 +88,47 @@ export class Interactions {
     return true;
   }
 
+  /**
+   * A top-level PM message in a channel with (possibly) open questions. Serialized per channel.
+   * Closes every question the message answers, re-asks only what remains, and reports passthrough
+   * when the message is not an answer so the caller processes it as a normal request.
+   */
+  handleChannelMessage(channel: string, text: string): Promise<ChannelOutcome> {
+    const prev = this.chains.get(channel) ?? Promise.resolve();
+    const run = prev.then(() => this.matchAndClose(channel, text));
+    this.chains.set(channel, run.catch(() => undefined));
+    return run;
+  }
+
+  private async matchAndClose(channel: string, text: string): Promise<ChannelOutcome> {
+    const out: ChannelOutcome = { closed: [], orphaned: new Set(), reasked: [], passthrough: false };
+    const open = this.db.openQuestionsByChannel(channel);
+    const m = open.length && this.opts.judge ? await matchAnswer(text, open, this.opts.judge) : ({ kind: 'none' } as const);
+    if (m.kind === 'none') return { ...out, passthrough: true };
+    const byId = new Map(open.map((q) => [q.id, q]));
+    for (const a of m.answers) {
+      const p = byId.get(a.id)!;
+      const orphaned = !this.waiters.has(p.id);
+      if (!this.resolve(p.id, a.answer)) continue; // closed concurrently (e.g. thread reply): not ours to ack
+      out.closed.push(p);
+      if (orphaned) out.orphaned.add(p.id);
+    }
+    const mention = this.pmMention();
+    for (const r of m.remaining) {
+      const p = byId.get(r.id)!;
+      await postAs(this.client, p.agent, { channel, thread_ts: p.message_ts, text: `${mention} Still need an answer on: ${r.missing}`.trim() }).catch(() => undefined);
+      out.reasked.push(p.id);
+    }
+    if (m.ambiguous) {
+      const list = open.map((q) => `• ${q.prompt}`).join('\n');
+      await postAs(this.client, open[0].agent, { channel, text: `${mention} I could not tell which question that answers, so I closed nothing. Please reply in the thread of the question:\n${list}`.trim() }).catch(() => undefined);
+    }
+    return out;
+  }
+
+  /** Placeholder for SWE-2's R8 acknowledgement (TP-0003-b); same signature. */
+  async acknowledgeClosed(channel: string, closed: Pending[], pmMessageTs: string): Promise<void> {
+    if (!closed.length) return;
+    await postAs(this.client, 'EM', { channel, thread_ts: pmMessageTs, text: `:white_check_mark: Closed: ${closed.map((q) => q.prompt.slice(0, 80)).join('; ')}` }).catch(() => undefined);
+  }
 }
